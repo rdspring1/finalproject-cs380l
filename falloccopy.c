@@ -11,6 +11,8 @@
 #include <iostream>
 #include <errno.h>
 #include <execinfo.h>
+#include <fcntl.h>
+#include <linux/falloc.h>
 
 #define ARGSNUM 3
 #define BTSIZE 10
@@ -123,10 +125,15 @@ int copy_file(const char *srcpath, const char *destpath)
 	{
 		return true;
 	}
-
+	
 	if(ftruncate(destfd, 0) == ERROR)
 	{
 		strexit("TRUNCATE");
+	}
+
+	if(st->st_size > 0 && fallocate(destfd, FALLOC_FL_KEEP_SIZE, 0, st->st_size) == ERROR)
+	{
+		strexit("FALLOCATE");
 	}
 
 	char* buffer = (char*) malloc(PAGESIZE);

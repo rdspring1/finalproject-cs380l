@@ -1,6 +1,9 @@
-obj-m = pen_register.o
-KVERSION = $(shell uname -r)
 all:
-	make -C /lib/modules/$(KVERSION)/build M=$(PWD) modules
+	gcc -g readdir1.c -o readdir1
+	gcc -g readdir2.c -o readdir2
+	g++ -rdynamic -g -Wall syncopy.c -o syncopy
+
 clean:
-	make -C /lib/modules/$(KVERSION)/build M=$(PWD) clean
+	rm -f readdir1
+	rm -f readdir2
+	rm -f syncopy

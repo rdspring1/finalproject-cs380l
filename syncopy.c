@@ -20,6 +20,11 @@
 
 std::string* destfilepath;
 
+void cleanup()
+{
+	free(destfilepath);
+}
+
 void print_backtrace()
 {
 	printf("Backtrace\n");
@@ -40,6 +45,7 @@ void strexit()
 {
 	print_backtrace();
 	printf("Error: %s\n", strerror(errno));
+	cleanup();
 	exit(EXIT_FAILURE);
 }
 
@@ -54,6 +60,7 @@ void strexit(const char* msg)
 	{
 		printf("syncpy: %s\n", msg);
 	}
+	cleanup();
 	exit(EXIT_FAILURE);
 }
 
@@ -65,22 +72,14 @@ bool samefile(int fd1, int fd2)
 	return (stat1.st_dev == stat2.st_dev) && (stat1.st_ino == stat2.st_ino);
 }
 
-
-static int display_info(const char *fpath, const struct stat *sb, int tflag, struct FTW *ftwbuf)
-{
-	printf("%-3s %2d %7jd   %-40s %d %s\n",
-			(tflag == FTW_D) ?   "d"   : (tflag == FTW_DNR) ? "dnr" :
-			(tflag == FTW_DP) ?  "dp"  : (tflag == FTW_F) ?   "f" :
-			(tflag == FTW_NS) ?  "ns"  : (tflag == FTW_SL) ?  "sl" :
-			(tflag == FTW_SLN) ? "sln" : "???",
-			ftwbuf->level, (intmax_t) sb->st_size,
-			fpath, ftwbuf->base, fpath + ftwbuf->base);
-	return 0;           /* To tell nftw() to continue */
-}
-
 std::string filepathname(const std::string& str, int level)
 {
 	size_t pos = str.length();
+	if(str.find_last_of("/\\", pos-1) == str.length()-1)
+	{
+		--pos;
+	}		
+
 	for(int i = 0; i < level; ++i)
 	{
 		pos = str.find_last_of("/\\", pos-1);
@@ -103,10 +102,21 @@ int copy_file(const char *srcpath, const char *destpath)
 		strexit("FSTAT");
 	}
 
-	int destfd = open(destpath, O_WRONLY | O_CREAT | O_APPEND, st->st_mode);
-	if(destfd == ERROR)
+	int destfd = ERROR;
+	if(S_ISDIR(st->st_mode))
 	{
-		strexit(destpath);
+		if(mkdir(destpath, st->st_mode) == ERROR)
+		{
+			strexit(destpath);
+		}
+		return 0;
+	}
+	else
+	{
+		if((destfd = open(destpath, O_WRONLY | O_CREAT | O_APPEND, st->st_mode)) == ERROR)
+		{
+			strexit(destpath);
+		}
 	}
 
 	if(samefile(srcfd, destfd))
@@ -125,7 +135,7 @@ int copy_file(const char *srcpath, const char *destpath)
 		{ 
 			strexit("READ");
 		}
-		
+
 		if(write(destfd, buffer, PAGESIZE) == ERROR)
 		{
 			strexit("WRITE");
@@ -134,7 +144,27 @@ int copy_file(const char *srcpath, const char *destpath)
 	free(st);
 	free(buffer);
 	close(srcfd);
-	return destfd;
+	close(destfd);
+	return 0;
+}
+
+static int copy_directory(const char *fpath, const struct stat *sb, int tflag, struct FTW *ftwbuf)
+{
+	//printf("%-3s %2d %7jd   %-40s %d %s\n",
+	//(tflag == FTW_D) ?   "d"   : (tflag == FTW_DNR) ? "dnr" :
+	//(tflag == FTW_DP) ?  "dp"  : (tflag == FTW_F) ?   "f" :
+	//(tflag == FTW_NS) ?  "ns"  : (tflag == FTW_SL) ?  "sl" :
+	//(tflag == FTW_SLN) ? "sln" : "???",
+	//ftwbuf->level, (intmax_t) sb->st_size,
+	//fpath, ftwbuf->base, fpath + ftwbuf->base);
+	if(ftwbuf->level == 0)
+	{
+		return 0;
+	}
+
+	//printf("%s\n", (*destfilepath + filepathname(std::string(fpath), ftwbuf->level)).c_str());	
+	copy_file(fpath, (*destfilepath + filepathname(std::string(fpath), ftwbuf->level)).c_str());	
+	return 0;           /* To tell nftw() to continue */
 }
 
 int main(int argc, char *argv[])
@@ -144,12 +174,14 @@ int main(int argc, char *argv[])
 		strexit("Missing Operands");
 	}
 
+	destfilepath = new std::string(argv[2]);	
+
 	struct stat* srcst = (struct stat*) malloc(sizeof(struct stat));
 	if(stat(argv[1], srcst) == ERROR) 
 	{ 
 		strexit("SRC FSTAT");
 	}
-	
+
 	struct stat* destst = (struct stat*) malloc(sizeof(struct stat));
 	if(stat(argv[2], destst) == ERROR) 
 	{ 
@@ -166,46 +198,47 @@ int main(int argc, char *argv[])
 				{
 					strexit("MKDIR");
 				}
-				// TODO: copy_directory
+				// copy_directory
+				if (nftw(argv[1], copy_directory, NOPENFD, FTW_PHYS) == ERROR) 
+				{
+					strexit("FTW");
+				}
 			}
 			else
 			{
 				copy_file(argv[1], argv[2]);
 			}
-			exit(EXIT_SUCCESS);
 		}
-	}
-
-	if(!S_ISDIR(srcst->st_mode)) 
-	{
-		if(!S_ISDIR(destst->st_mode)) // SRC-FILE DEST-FILE
-		{
-			copy_file(argv[1], argv[2]);
-		}
-		else // SRC-FILE DEST-DIRECTORY
-		{
-			copy_file(argv[1], (std::string(argv[2]) + filepathname(std::string(argv[1]), 1)).c_str());
-		}
-	}
-	else if(S_ISDIR(destst->st_mode)) // SRC-DIRECTORY AND DEST-DIRECTORY
-	{
-		if(mkdir((std::string(argv[2]) + filepathname(std::string(argv[1]), 1)).c_str(), S_IRWXU | S_IRWXG) == ERROR)
-		{
-			strexit("MKDIR");
-		}
-		// TODO: copy_directory
 	}
 	else
 	{
-		strexit("Cannot copy directory to file");
+		if(!S_ISDIR(srcst->st_mode)) 
+		{
+			if(!S_ISDIR(destst->st_mode)) // SRC-FILE DEST-FILE
+			{
+				copy_file(argv[1], argv[2]);
+			}
+			else // SRC-FILE DEST-DIRECTORY
+			{
+				copy_file(argv[1], (std::string(argv[2]) + filepathname(std::string(argv[1]), 1)).c_str());
+			}
+		}
+		else if(S_ISDIR(destst->st_mode)) // SRC-DIRECTORY AND DEST-DIRECTORY
+		{
+			destfilepath->append(filepathname(std::string(argv[1]), 1));	
+			copy_file(argv[1], destfilepath->c_str());
+			// copy_directory
+			if (nftw(argv[1], copy_directory, NOPENFD, FTW_PHYS) == ERROR) 
+			{
+				strexit("FTW");
+			}
+		}
+		else
+		{
+			strexit("Cannot copy directory to file");
+		}
 	}
-
-	//printf("%s\n", (std::string(argv[2]) + filepathname(std::string(argv[1]), 2)).c_str());
-	//int flags = 0;
-	//if (nftw(argv[1], display_info, 50, FTW_PHYS | FTW_DEPTH == -1)) 
-	//{
-	//	exit(EXIT_FAILURE);
-	//}
+	cleanup();
 	exit(EXIT_SUCCESS);
 }
 

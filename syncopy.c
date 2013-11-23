@@ -18,6 +18,7 @@
 #define ERROR -1
 #define NOPENFD 50
 
+std::string* srcfilepath;
 std::string* destfilepath;
 
 void cleanup()
@@ -175,6 +176,26 @@ int main(int argc, char *argv[])
 	}
 
 	destfilepath = new std::string(argv[2]);	
+
+	if(!strchr(argv[1], '/'))
+	{		
+		srcfilepath = new std::string("./");
+		srcfilepath->append(argv[1]);
+	}
+	else
+	{
+		srcfilepath = new std::string(argv[1]);
+	}
+
+	if(!strchr(argv[2], '/'))
+	{		
+		destfilepath = new std::string("./");
+		destfilepath->append(argv[2]);
+	}
+	else
+	{
+		destfilepath = new std::string(argv[2]);
+	}
 
 	struct stat* srcst = (struct stat*) malloc(sizeof(struct stat));
 	if(stat(argv[1], srcst) == ERROR) 

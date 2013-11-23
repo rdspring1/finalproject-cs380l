@@ -13,14 +13,29 @@
 #include <execinfo.h>
 #include <fcntl.h>
 #include <linux/falloc.h>
+#include <aio.h>
+#include <signal.h>
+#include <semaphore.h>
 
 #define ARGSNUM 3
 #define BTSIZE 10
 #define ERROR -1
 #define NOPENFD 50
+#define AIOMAX 1
+
+struct fileaio
+{
+	int srcfd;
+	int destfd;
+	off_t filesize;
+	struct aiocb** list;
+};
 
 std::string* srcfilepath;
 std::string* destfilepath;
+int outstanding_aio = 0;
+sem_t sema_aio;
+
 
 void cleanup()
 {
@@ -89,9 +104,106 @@ std::string filepathname(const std::string& str, int level)
 	return str.substr(pos);
 }
 
+void write_aio_handler(sigval_t sigval)
+{
+	struct aiocb** list = (struct aiocb**) sigval.sival_ptr;
+	// Handle Write AIO
+	for(int pos = 0; pos < AIOMAX && list[pos]; ++pos)
+	{
+		if(aio_error(list[pos]))
+		{
+			strexit("WRITE AIO ERROR");
+		}
+	}	
+	--outstanding_aio;
+	//sem_post(&sema_aio);
+}
+
+void read_aio_handler(sigval_t sigval)
+{
+	const unsigned PAGESIZE = sysconf(_SC_PAGESIZE);
+	struct fileaio* arg = (struct fileaio*) sigval.sival_ptr;
+	struct aiocb* writelist[AIOMAX];
+
+	// Handle Write AIO
+	int pos;
+	for(pos = 0; pos < AIOMAX && arg->list[pos]; ++pos)
+	{
+		if(aio_error(arg->list[pos]))
+		{
+			strexit("READ AIO ERROR");
+		}
+
+		writelist[pos] = (struct aiocb*) malloc(sizeof(struct aiocb));
+		if(!writelist[pos])
+		{
+			strexit("AIOCB MALLOC");
+		}
+
+		writelist[pos]->aio_fildes = arg->destfd;
+		writelist[pos]->aio_buf = arg->list[pos]->aio_buf;
+		writelist[pos]->aio_nbytes = PAGESIZE;
+		writelist[pos]->aio_offset = arg->list[pos]->aio_offset;
+		writelist[pos]->aio_lio_opcode = LIO_WRITE;
+	}
+
+	// Setup Sigevent
+	struct sigevent write_sig_evnt;
+	write_sig_evnt.sigev_notify = SIGEV_THREAD;
+	write_sig_evnt.sigev_notify_function = write_aio_handler;
+	write_sig_evnt.sigev_notify_attributes = NULL;
+	write_sig_evnt.sigev_value.sival_ptr = &writelist;
+	if(lio_listio(LIO_NOWAIT, writelist, AIOMAX, &write_sig_evnt) == ERROR)
+	{
+		strexit("WRITE LIO_LISTIO");
+	}
+	++outstanding_aio;
+
+	if(arg->list[pos-1]->aio_offset + PAGESIZE < arg->filesize)
+	{
+		struct aiocb* readlist[AIOMAX];
+		for(unsigned i = 0, offset = arg->list[pos-1]->aio_offset + PAGESIZE; i < AIOMAX && offset < arg->filesize; ++i, offset += PAGESIZE)
+		{
+			readlist[i] = (struct aiocb*) malloc(sizeof(struct aiocb));
+			if(!readlist[i])
+			{
+				strexit("AIOCB MALLOC");
+			}
+
+			readlist[i]->aio_fildes = arg->srcfd;
+			readlist[i]->aio_buf = malloc(PAGESIZE);
+			if(!readlist[i]->aio_buf)
+			{
+				strexit("AIOCB BUFFER");
+			}
+			readlist[i]->aio_nbytes = PAGESIZE;
+			readlist[i]->aio_offset = offset;
+			readlist[i]->aio_lio_opcode = LIO_READ;
+		}
+
+		arg->list = readlist;
+
+		// Setup Sigevent
+		struct sigevent read_sig_evnt;
+		read_sig_evnt.sigev_notify = SIGEV_THREAD;
+		read_sig_evnt.sigev_notify_function = read_aio_handler;
+		read_sig_evnt.sigev_notify_attributes = NULL;
+		read_sig_evnt.sigev_value.sival_ptr = arg;
+		if(lio_listio(LIO_NOWAIT, readlist, AIOMAX, &read_sig_evnt) == ERROR)
+		{
+			strexit("READ LIO_LISTIO");
+		}
+		++outstanding_aio;
+		printf("Outstanding_AIO: %d\n", outstanding_aio);
+	}
+	--outstanding_aio;
+	sem_post(&sema_aio);
+}
+
+
 int copy_file(const char *srcpath, const char *destpath)
 {
-	const unsigned PAGESIZE = getpagesize();
+	const unsigned PAGESIZE = sysconf(_SC_PAGESIZE);
 	int srcfd = open(srcpath, O_RDONLY);
 	if(srcfd == ERROR)
 	{
@@ -115,7 +227,7 @@ int copy_file(const char *srcpath, const char *destpath)
 	}
 	else
 	{
-		if((destfd = open(destpath, O_WRONLY | O_CREAT | O_APPEND, st->st_mode)) == ERROR)
+		if((destfd = open(destpath, O_WRONLY | O_CREAT, st->st_mode)) == ERROR)
 		{
 			strexit(destpath);
 		}
@@ -125,34 +237,55 @@ int copy_file(const char *srcpath, const char *destpath)
 	{
 		return true;
 	}
-	
+
 	if(ftruncate(destfd, 0) == ERROR)
 	{
 		strexit("TRUNCATE");
 	}
 
-	if(st->st_size > 0 && fallocate(destfd, FALLOC_FL_KEEP_SIZE, 0, st->st_size) == ERROR)
+	if(st->st_size > 0 && fallocate(destfd, 0, 0, st->st_size) == ERROR)
 	{
 		strexit("FALLOCATE");
 	}
 
-	char* buffer = (char*) malloc(PAGESIZE);
-	for(unsigned i = 0; i < st->st_size; i += PAGESIZE)
+	struct aiocb* list[AIOMAX];
+	for(unsigned i = 0, offset = 0; i < AIOMAX && offset < st->st_size; ++i, offset += PAGESIZE)
 	{
-		if(read(srcfd, buffer, PAGESIZE) == ERROR)
-		{ 
-			strexit("READ");
+		list[i] = (struct aiocb*)malloc(sizeof(struct aiocb));
+		if(!list[i])
+		{
+			strexit("AIOCB MALLOC");
 		}
 
-		if(write(destfd, buffer, PAGESIZE) == ERROR)
+		list[i]->aio_fildes = srcfd;
+		list[i]->aio_buf = malloc(PAGESIZE);
+		if(!list[i]->aio_buf)
 		{
-			strexit("WRITE");
+			strexit("AIOCB BUFFER");
 		}
+		list[i]->aio_nbytes = PAGESIZE;
+		list[i]->aio_offset = offset;
+		list[i]->aio_lio_opcode = LIO_READ;
 	}
-	free(st);
-	free(buffer);
-	close(srcfd);
-	close(destfd);
+
+	struct fileaio arg;
+	arg.srcfd = srcfd;
+	arg.destfd = destfd;
+	arg.filesize = st->st_size;
+	arg.list = list;
+
+	// Setup Sigevent
+	struct sigevent sig_evnt;
+	sig_evnt.sigev_notify = SIGEV_THREAD;
+	sig_evnt.sigev_notify_function = read_aio_handler;
+	sig_evnt.sigev_notify_attributes = NULL;
+	sig_evnt.sigev_value.sival_ptr = &arg;
+	if(lio_listio(LIO_NOWAIT, list, AIOMAX, &sig_evnt) == ERROR)
+	{
+		strexit("READ LIO_LISTIO");
+	}
+	++outstanding_aio;
+
 	return 0;
 }
 
@@ -170,7 +303,6 @@ static int copy_directory(const char *fpath, const struct stat *sb, int tflag, s
 		return 0;
 	}
 
-	//printf("%s\n", (*destfilepath + filepathname(std::string(fpath), ftwbuf->level)).c_str());	
 	copy_file(fpath, (*destfilepath + filepathname(std::string(fpath), ftwbuf->level)).c_str());	
 	return 0;           /* To tell nftw() to continue */
 }
@@ -207,6 +339,9 @@ int main(int argc, char *argv[])
 			destfilepath = new std::string(argv[2]);
 		}
 	}
+
+	// Initialize Semaphore to track asynchronous I/O
+	sem_init(&sema_aio, 0, 0);
 
 	struct stat* srcst = (struct stat*) malloc(sizeof(struct stat));
 	if(stat(srcfilepath->c_str(), srcst) == ERROR) 
@@ -270,6 +405,14 @@ int main(int argc, char *argv[])
 			strexit("Cannot copy directory to file");
 		}
 	}
+
+	// WAIT FOR ASYNCHRONOUS I/O TO FINISH
+	while(outstanding_aio > 0)
+	{
+		//sem_wait(&sema_aio);
+	}
+	sem_destroy(&sema_aio);
+
 	cleanup();
 	exit(EXIT_SUCCESS);
 }

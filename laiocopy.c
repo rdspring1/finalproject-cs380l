@@ -21,7 +21,7 @@
 #define BTSIZE 10
 #define ERROR -1
 #define NOPENFD 50
-#define AIOMAX 1
+#define AIOMAX 10
 
 struct fileaio
 {
@@ -81,6 +81,14 @@ void strexit(const char* msg)
 	exit(EXIT_FAILURE);
 }
 
+void strexit(const char* msg, int errval)
+{
+	print_backtrace();
+	printf("Error: %s: %s\n", msg, strerror(errval));
+	cleanup();
+	exit(EXIT_FAILURE);
+}
+
 bool samefile(int fd1, int fd2)
 {
 	struct stat stat1, stat2;
@@ -112,7 +120,7 @@ void write_aio_handler(sigval_t sigval)
 	{
 		if(aio_error(list[pos]))
 		{
-			strexit("WRITE AIO ERROR");
+			strexit("WRITE AIO ERROR", aio_return(list[pos]));
 		}
 	}	
 	--outstanding_aio;
@@ -123,7 +131,7 @@ void read_aio_handler(sigval_t sigval)
 {
 	const unsigned PAGESIZE = sysconf(_SC_PAGESIZE);
 	struct fileaio* arg = (struct fileaio*) sigval.sival_ptr;
-	struct aiocb* writelist[AIOMAX];
+	struct aiocb* writelist[AIOMAX] = {};
 
 	// Handle Write AIO
 	int pos;
@@ -131,7 +139,7 @@ void read_aio_handler(sigval_t sigval)
 	{
 		if(aio_error(arg->list[pos]))
 		{
-			strexit("READ AIO ERROR");
+			strexit("READ AIO ERROR", aio_return(arg->list[pos]));
 		}
 
 		writelist[pos] = (struct aiocb*) malloc(sizeof(struct aiocb));
@@ -142,7 +150,7 @@ void read_aio_handler(sigval_t sigval)
 
 		writelist[pos]->aio_fildes = arg->destfd;
 		writelist[pos]->aio_buf = arg->list[pos]->aio_buf;
-		writelist[pos]->aio_nbytes = PAGESIZE;
+		writelist[pos]->aio_nbytes = aio_return(arg->list[pos]);
 		writelist[pos]->aio_offset = arg->list[pos]->aio_offset;
 		writelist[pos]->aio_lio_opcode = LIO_WRITE;
 	}
@@ -161,7 +169,7 @@ void read_aio_handler(sigval_t sigval)
 
 	if(arg->list[pos-1]->aio_offset + PAGESIZE < arg->filesize)
 	{
-		struct aiocb* readlist[AIOMAX];
+		struct aiocb* readlist[AIOMAX] = {};
 		for(unsigned i = 0, offset = arg->list[pos-1]->aio_offset + PAGESIZE; i < AIOMAX && offset < arg->filesize; ++i, offset += PAGESIZE)
 		{
 			readlist[i] = (struct aiocb*) malloc(sizeof(struct aiocb));
@@ -194,7 +202,6 @@ void read_aio_handler(sigval_t sigval)
 			strexit("READ LIO_LISTIO");
 		}
 		++outstanding_aio;
-		printf("Outstanding_AIO: %d\n", outstanding_aio);
 	}
 	--outstanding_aio;
 	sem_post(&sema_aio);
@@ -248,7 +255,7 @@ int copy_file(const char *srcpath, const char *destpath)
 		strexit("FALLOCATE");
 	}
 
-	struct aiocb* list[AIOMAX];
+	struct aiocb* list[AIOMAX] = {};
 	for(unsigned i = 0, offset = 0; i < AIOMAX && offset < st->st_size; ++i, offset += PAGESIZE)
 	{
 		list[i] = (struct aiocb*)malloc(sizeof(struct aiocb));

@@ -139,12 +139,13 @@ int copy_file(const char *srcpath, const char *destpath)
 	char* buffer = (char*) malloc(PAGESIZE);
 	for(unsigned i = 0; i < st->st_size; i += PAGESIZE)
 	{
-		if(read(srcfd, buffer, PAGESIZE) == ERROR)
+		int dataread = read(srcfd, buffer, PAGESIZE);	
+		if(dataread == ERROR)
 		{ 
 			strexit("READ");
 		}
 
-		if(write(destfd, buffer, PAGESIZE) == ERROR)
+		if(write(destfd, buffer, dataread) == ERROR)
 		{
 			strexit("WRITE");
 		}

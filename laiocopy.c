@@ -114,13 +114,13 @@ std::string filepathname(const std::string& str, int level)
 
 void write_aio_handler(sigval_t sigval)
 {
-	struct aiocb** list = (struct aiocb**) sigval.sival_ptr;
+	struct fileaio* arg = (struct fileaio*) sigval.sival_ptr;
 	// Handle Write AIO
-	for(int pos = 0; pos < AIOMAX && list[pos]; ++pos)
+	for(int pos = 0; pos < AIOMAX && arg->list[pos]; ++pos)
 	{
-		if(aio_error(list[pos]))
+		if(aio_error(arg->list[pos]) > 0)
 		{
-			strexit("WRITE AIO ERROR", aio_return(list[pos]));
+			strexit("WRITE AIO ERROR", aio_return(arg->list[pos]));
 		}
 	}	
 	--outstanding_aio;
@@ -131,13 +131,13 @@ void read_aio_handler(sigval_t sigval)
 {
 	const unsigned PAGESIZE = sysconf(_SC_PAGESIZE);
 	struct fileaio* arg = (struct fileaio*) sigval.sival_ptr;
-	struct aiocb* writelist[AIOMAX] = {};
+	struct aiocb** writelist = new struct aiocb*[AIOMAX]();
 
 	// Handle Write AIO
 	int pos;
 	for(pos = 0; pos < AIOMAX && arg->list[pos]; ++pos)
 	{
-		if(aio_error(arg->list[pos]))
+		if(aio_error(arg->list[pos]) > 0)
 		{
 			strexit("READ AIO ERROR", aio_return(arg->list[pos]));
 		}
@@ -155,12 +155,18 @@ void read_aio_handler(sigval_t sigval)
 		writelist[pos]->aio_lio_opcode = LIO_WRITE;
 	}
 
+	struct fileaio* writearg = (struct fileaio*) malloc(sizeof(fileaio));
+	writearg->srcfd = arg->srcfd;
+	writearg->destfd = arg->destfd;
+	writearg->filesize = arg->filesize;
+	writearg->list = writelist;
+
 	// Setup Sigevent
 	struct sigevent write_sig_evnt;
 	write_sig_evnt.sigev_notify = SIGEV_THREAD;
 	write_sig_evnt.sigev_notify_function = write_aio_handler;
 	write_sig_evnt.sigev_notify_attributes = NULL;
-	write_sig_evnt.sigev_value.sival_ptr = &writelist;
+	write_sig_evnt.sigev_value.sival_ptr = writearg;
 	if(lio_listio(LIO_NOWAIT, writelist, AIOMAX, &write_sig_evnt) == ERROR)
 	{
 		strexit("WRITE LIO_LISTIO");

@@ -75,7 +75,7 @@ void strexit(const char* msg)
 	}
 	else
 	{
-		printf("syncpy: %s\n", msg);
+		printf("laiocpy: %s\n", msg);
 	}
 	cleanup();
 	exit(EXIT_FAILURE);
@@ -173,10 +173,10 @@ void read_aio_handler(sigval_t sigval)
 	}
 	++outstanding_aio;
 
-	if(arg->list[pos-1]->aio_offset + PAGESIZE < arg->filesize)
+	if(arg->list[pos-1]->aio_offset + PAGESIZE <= arg->filesize)
 	{
 		struct aiocb** readlist = new struct aiocb*[AIOMAX]();
-		for(unsigned i = 0, offset = arg->list[pos-1]->aio_offset + PAGESIZE; i < AIOMAX && offset < arg->filesize; ++i, offset += PAGESIZE)
+		for(unsigned i = 0, offset = arg->list[pos-1]->aio_offset + PAGESIZE; i < AIOMAX && offset <= arg->filesize; ++i, offset += PAGESIZE)
 		{
 			readlist[i] = (struct aiocb*) malloc(sizeof(struct aiocb));
 			if(!readlist[i])
@@ -262,7 +262,7 @@ int copy_file(const char *srcpath, const char *destpath)
 	}
 
 	struct aiocb** list = new struct aiocb*[AIOMAX]();
-	for(unsigned i = 0, offset = 0; i < AIOMAX && offset < st->st_size; ++i, offset += PAGESIZE)
+	for(unsigned i = 0, offset = 0; i < AIOMAX && offset <= st->st_size; ++i, offset += PAGESIZE)
 	{
 		list[i] = (struct aiocb*)malloc(sizeof(struct aiocb));
 		if(!list[i])

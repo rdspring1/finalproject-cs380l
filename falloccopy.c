@@ -60,7 +60,7 @@ void strexit(const char* msg)
 	}
 	else
 	{
-		printf("syncpy: %s\n", msg);
+		printf("falloccpy: %s\n", msg);
 	}
 	cleanup();
 	exit(EXIT_FAILURE);

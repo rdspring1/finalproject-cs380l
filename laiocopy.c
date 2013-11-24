@@ -118,13 +118,13 @@ void write_aio_handler(sigval_t sigval)
 	// Handle Write AIO
 	for(int pos = 0; pos < AIOMAX && arg->list[pos]; ++pos)
 	{
-		if(aio_error(arg->list[pos]) > 0)
+		if(aio_error(arg->list[pos]))
 		{
 			strexit("WRITE AIO ERROR", aio_return(arg->list[pos]));
 		}
 	}	
 	--outstanding_aio;
-	//sem_post(&sema_aio);
+	sem_post(&sema_aio);
 }
 
 void read_aio_handler(sigval_t sigval)
@@ -175,7 +175,7 @@ void read_aio_handler(sigval_t sigval)
 
 	if(arg->list[pos-1]->aio_offset + PAGESIZE < arg->filesize)
 	{
-		struct aiocb* readlist[AIOMAX] = {};
+		struct aiocb** readlist = new struct aiocb*[AIOMAX]();
 		for(unsigned i = 0, offset = arg->list[pos-1]->aio_offset + PAGESIZE; i < AIOMAX && offset < arg->filesize; ++i, offset += PAGESIZE)
 		{
 			readlist[i] = (struct aiocb*) malloc(sizeof(struct aiocb));
@@ -261,7 +261,7 @@ int copy_file(const char *srcpath, const char *destpath)
 		strexit("FALLOCATE");
 	}
 
-	struct aiocb* list[AIOMAX] = {};
+	struct aiocb** list = new struct aiocb*[AIOMAX]();
 	for(unsigned i = 0, offset = 0; i < AIOMAX && offset < st->st_size; ++i, offset += PAGESIZE)
 	{
 		list[i] = (struct aiocb*)malloc(sizeof(struct aiocb));
@@ -281,18 +281,18 @@ int copy_file(const char *srcpath, const char *destpath)
 		list[i]->aio_lio_opcode = LIO_READ;
 	}
 
-	struct fileaio arg;
-	arg.srcfd = srcfd;
-	arg.destfd = destfd;
-	arg.filesize = st->st_size;
-	arg.list = list;
+	struct fileaio* arg = (struct fileaio*) malloc(sizeof(fileaio));
+	arg->srcfd = srcfd;
+	arg->destfd = destfd;
+	arg->filesize = st->st_size;
+	arg->list = list;
 
 	// Setup Sigevent
 	struct sigevent sig_evnt;
 	sig_evnt.sigev_notify = SIGEV_THREAD;
 	sig_evnt.sigev_notify_function = read_aio_handler;
 	sig_evnt.sigev_notify_attributes = NULL;
-	sig_evnt.sigev_value.sival_ptr = &arg;
+	sig_evnt.sigev_value.sival_ptr = arg;
 	if(lio_listio(LIO_NOWAIT, list, AIOMAX, &sig_evnt) == ERROR)
 	{
 		strexit("READ LIO_LISTIO");
@@ -422,7 +422,7 @@ int main(int argc, char *argv[])
 	// WAIT FOR ASYNCHRONOUS I/O TO FINISH
 	while(outstanding_aio > 0)
 	{
-		//sem_wait(&sema_aio);
+		sem_wait(&sema_aio);
 	}
 	sem_destroy(&sema_aio);
 

@@ -122,6 +122,7 @@ void write_aio_handler(sigval_t sigval)
 		{
 			strexit("WRITE AIO ERROR", aio_return(arg->list[pos]));
 		}
+		delete (char*) arg->list[pos]->aio_buf;
 	}	
 	--outstanding_aio;
 	sem_post(&sema_aio);
@@ -131,7 +132,7 @@ void read_aio_handler(sigval_t sigval)
 {
 	const unsigned PAGESIZE = sysconf(_SC_PAGESIZE);
 	struct fileaio* arg = (struct fileaio*) sigval.sival_ptr;
-	struct aiocb** writelist = new struct aiocb*[AIOMAX]();
+	//struct aiocb** writelist = new struct aiocb*[AIOMAX]();
 
 	// Handle Write AIO
 	int pos;
@@ -141,7 +142,7 @@ void read_aio_handler(sigval_t sigval)
 		{
 			strexit("READ AIO ERROR", aio_return(arg->list[pos]));
 		}
-
+		/*
 		writelist[pos] = (struct aiocb*) malloc(sizeof(struct aiocb));
 		if(!writelist[pos])
 		{
@@ -153,8 +154,9 @@ void read_aio_handler(sigval_t sigval)
 		writelist[pos]->aio_nbytes = aio_return(arg->list[pos]);
 		writelist[pos]->aio_offset = arg->list[pos]->aio_offset;
 		writelist[pos]->aio_lio_opcode = LIO_WRITE;
+		*/
 	}
-
+/*
 	struct fileaio* writearg = (struct fileaio*) malloc(sizeof(fileaio));
 	writearg->srcfd = arg->srcfd;
 	writearg->destfd = arg->destfd;
@@ -172,7 +174,7 @@ void read_aio_handler(sigval_t sigval)
 		strexit("WRITE LIO_LISTIO");
 	}
 	++outstanding_aio;
-
+*/
 	if(arg->list[pos-1]->aio_offset + PAGESIZE <= arg->filesize)
 	{
 		struct aiocb** readlist = new struct aiocb*[AIOMAX]();
@@ -195,6 +197,7 @@ void read_aio_handler(sigval_t sigval)
 			readlist[i]->aio_lio_opcode = LIO_READ;
 		}
 
+		delete[] arg->list;
 		arg->list = readlist;
 
 		// Setup Sigevent

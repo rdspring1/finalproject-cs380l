@@ -1,3 +1,4 @@
+#include <sys/time.h>
 #include <ftw.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,6 +25,7 @@ std::string* destfilepath;
 
 void cleanup()
 {
+	free(srcfilepath);
 	free(destfilepath);
 }
 
@@ -178,6 +180,10 @@ static int copy_directory(const char *fpath, const struct stat *sb, int tflag, s
 
 int main(int argc, char *argv[])
 {
+        struct timeval start_time;
+        struct timeval end_time;
+        gettimeofday(&start_time, NULL);
+
 	if(argc != ARGSNUM)	
 	{
 		strexit("Missing Operands");
@@ -272,6 +278,9 @@ int main(int argc, char *argv[])
 		}
 	}
 	cleanup();
+        gettimeofday(&end_time, NULL);
+        double seconds = difftime(end_time.tv_sec, start_time.tv_sec);
+	printf("Time Elapsed: %f seconds\n", seconds);
 	exit(EXIT_SUCCESS);
 }
 

@@ -1,3 +1,4 @@
+#include <sys/time.h>
 #include <ftw.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,7 +19,7 @@
 #include <semaphore.h>
 #include <algorithm>
 
-#define BUFSIZE 1
+#define BUFSIZE 16
 #define ARGSNUM 3
 #define BTSIZE 10
 #define ERROR -1
@@ -119,23 +120,17 @@ void aio_handler(sigval_t sigval)
 {
 	const unsigned PAGESIZE = sysconf(_SC_PAGESIZE) * BUFSIZE;
 	struct fileaio* arg = (struct fileaio*) sigval.sival_ptr;
-	void* buffer = malloc(PAGESIZE);
-	void* aiobuffer = NULL;
-	struct aiocb* cblist[AIOSUSPEND] = {};	
-	cblist[0] = arg->aio;
-
 	if(aio_error(arg->aio))
 	{
 		strexit("READ AIO ERROR", aio_return(arg->aio));
 	}
 
 	size_t dataread = aio_return(arg->aio);
-	aiobuffer = (void*) arg->aio->aio_buf;
-	std::swap(buffer, aiobuffer);
-
+	void* buffer = (void*) arg->aio->aio_buf;
 	arg->aio->aio_sigevent.sigev_notify = SIGEV_NONE;
-	for(off_t offset = arg->offset; offset < arg->filesize; offset += PAGESIZE)
+	for(off_t offset = arg->offset; offset <= arg->filesize; offset += PAGESIZE)
 	{
+		arg->aio->aio_buf = malloc(PAGESIZE);
 		arg->aio->aio_offset = offset;
 		
 		if(aio_read(arg->aio) == ERROR)
@@ -147,15 +142,14 @@ void aio_handler(sigval_t sigval)
 		{
 			strexit("WRITE");
 		}
+		free(buffer);
 
-		if(aio_suspend(cblist, AIOSUSPEND, NULL) == ERROR)
+		if(aio_suspend(&arg->aio, AIOSUSPEND, NULL) == ERROR)
 		{
 			strexit("AIO SUSPEND");
 		}
-		
 		dataread = aio_return(arg->aio);
-		aiobuffer = (void*) arg->aio->aio_buf;
-		std::swap(buffer, aiobuffer);
+		buffer = (void*) arg->aio->aio_buf;
 	}
 	
 	if(write(arg->destfd, buffer, dataread) == ERROR)
@@ -276,6 +270,10 @@ static int copy_directory(const char *fpath, const struct stat *sb, int tflag, s
 
 int main(int argc, char *argv[])
 {
+        struct timeval start_time;
+        struct timeval end_time;
+        gettimeofday(&start_time, NULL);
+
 	if(argc != ARGSNUM)	
 	{
 		strexit("Missing Operands");
@@ -381,6 +379,9 @@ int main(int argc, char *argv[])
 	sem_destroy(&sema_aio);
 
 	cleanup();
+        gettimeofday(&end_time, NULL);
+        double seconds = difftime(end_time.tv_sec, start_time.tv_sec);
+	printf("Time Elapsed: %f seconds\n", seconds);
 	exit(EXIT_SUCCESS);
 }
 

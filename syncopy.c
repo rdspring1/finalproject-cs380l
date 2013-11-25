@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <execinfo.h>
 
+#define BUFSIZE 16
 #define ARGSNUM 3
 #define BTSIZE 10
 #define ERROR -1
@@ -91,7 +92,7 @@ std::string filepathname(const std::string& str, int level)
 
 int copy_file(const char *srcpath, const char *destpath)
 {
-	const unsigned PAGESIZE = getpagesize();
+	const unsigned PAGESIZE = getpagesize() * BUFSIZE;
 	int srcfd = open(srcpath, O_RDONLY);
 	if(srcfd == ERROR)
 	{

@@ -17,17 +17,21 @@
 #include <signal.h>
 #include <semaphore.h>
 
+#define BUFSIZE 1
 #define ARGSNUM 3
 #define BTSIZE 10
 #define ERROR -1
 #define NOPENFD 50
-#define AIOMAX 1
+#define AIOMAX 10
 
 struct fileaio
 {
 	int srcfd;
 	int destfd;
+	int count;
 	off_t filesize;
+	off_t offset;
+	struct sigevent* handler;
 	struct aiocb** list;
 };
 
@@ -75,8 +79,16 @@ void strexit(const char* msg)
 	}
 	else
 	{
-		printf("syncpy: %s\n", msg);
+		printf("laiocpy: %s\n", msg);
 	}
+	cleanup();
+	exit(EXIT_FAILURE);
+}
+
+void strexit(const char* msg, int errval)
+{
+	print_backtrace();
+	printf("Error: %s: %s\n", msg, strerror(errval));
 	cleanup();
 	exit(EXIT_FAILURE);
 }
@@ -106,96 +118,98 @@ std::string filepathname(const std::string& str, int level)
 
 void write_aio_handler(sigval_t sigval)
 {
-	struct aiocb** list = (struct aiocb**) sigval.sival_ptr;
+	struct fileaio* arg = (struct fileaio*) sigval.sival_ptr;
 	// Handle Write AIO
-	for(int pos = 0; pos < AIOMAX && list[pos]; ++pos)
+	for(int pos = 0; pos < arg->count; ++pos)
 	{
-		if(aio_error(list[pos]))
+		if(aio_error(arg->list[pos]))
 		{
-			strexit("WRITE AIO ERROR");
+			strexit("WRITE AIO ERROR", aio_return(arg->list[pos]));
 		}
 	}	
 	--outstanding_aio;
-	//sem_post(&sema_aio);
+	sem_post(&sema_aio);
 }
 
 void read_aio_handler(sigval_t sigval)
 {
-	const unsigned PAGESIZE = sysconf(_SC_PAGESIZE);
-	struct fileaio* arg = (struct fileaio*) sigval.sival_ptr;
-	struct aiocb* writelist[AIOMAX];
+	const unsigned PAGESIZE = sysconf(_SC_PAGESIZE) * BUFSIZE;
+	struct fileaio* oldarg = (struct fileaio*) sigval.sival_ptr;
 
-	// Handle Write AIO
-	int pos;
-	for(pos = 0; pos < AIOMAX && arg->list[pos]; ++pos)
+	if(oldarg->offset <= oldarg->filesize)
 	{
-		if(aio_error(arg->list[pos]))
+		struct aiocb** list = new struct aiocb*[AIOMAX]();
+		unsigned offset, pos;
+		for(pos = 0, offset = oldarg->offset; pos < AIOMAX && offset <= oldarg->filesize; ++pos, offset += PAGESIZE)
 		{
-			strexit("READ AIO ERROR");
-		}
-
-		writelist[pos] = (struct aiocb*) malloc(sizeof(struct aiocb));
-		if(!writelist[pos])
-		{
-			strexit("AIOCB MALLOC");
-		}
-
-		writelist[pos]->aio_fildes = arg->destfd;
-		writelist[pos]->aio_buf = arg->list[pos]->aio_buf;
-		writelist[pos]->aio_nbytes = PAGESIZE;
-		writelist[pos]->aio_offset = arg->list[pos]->aio_offset;
-		writelist[pos]->aio_lio_opcode = LIO_WRITE;
-	}
-
-	// Setup Sigevent
-	struct sigevent write_sig_evnt;
-	write_sig_evnt.sigev_notify = SIGEV_THREAD;
-	write_sig_evnt.sigev_notify_function = write_aio_handler;
-	write_sig_evnt.sigev_notify_attributes = NULL;
-	write_sig_evnt.sigev_value.sival_ptr = &writelist;
-	if(lio_listio(LIO_NOWAIT, writelist, AIOMAX, &write_sig_evnt) == ERROR)
-	{
-		strexit("WRITE LIO_LISTIO");
-	}
-	++outstanding_aio;
-
-	if(arg->list[pos-1]->aio_offset + PAGESIZE < arg->filesize)
-	{
-		struct aiocb* readlist[AIOMAX];
-		for(unsigned i = 0, offset = arg->list[pos-1]->aio_offset + PAGESIZE; i < AIOMAX && offset < arg->filesize; ++i, offset += PAGESIZE)
-		{
-			readlist[i] = (struct aiocb*) malloc(sizeof(struct aiocb));
-			if(!readlist[i])
+			list[pos] = (struct aiocb*)malloc(sizeof(struct aiocb));
+			if(!list[pos])
 			{
 				strexit("AIOCB MALLOC");
 			}
 
-			readlist[i]->aio_fildes = arg->srcfd;
-			readlist[i]->aio_buf = malloc(PAGESIZE);
-			if(!readlist[i]->aio_buf)
+			list[pos]->aio_fildes = oldarg->srcfd;
+			list[pos]->aio_buf = malloc(PAGESIZE);
+			if(!list[pos]->aio_buf)
 			{
 				strexit("AIOCB BUFFER");
 			}
-			readlist[i]->aio_nbytes = PAGESIZE;
-			readlist[i]->aio_offset = offset;
-			readlist[i]->aio_lio_opcode = LIO_READ;
+			list[pos]->aio_nbytes = PAGESIZE;
+			list[pos]->aio_offset = offset;
+			list[pos]->aio_lio_opcode = LIO_READ;
 		}
 
-		arg->list = readlist;
+		// Setup sigevent handler for when AIO finishes
+		struct sigevent* sig_evnt = (struct sigevent*) malloc(sizeof(struct sigevent));
+		sig_evnt->sigev_notify = SIGEV_THREAD;
+		sig_evnt->sigev_notify_function = read_aio_handler;
+		sig_evnt->sigev_notify_attributes = NULL;
 
-		// Setup Sigevent
-		struct sigevent read_sig_evnt;
-		read_sig_evnt.sigev_notify = SIGEV_THREAD;
-		read_sig_evnt.sigev_notify_function = read_aio_handler;
-		read_sig_evnt.sigev_notify_attributes = NULL;
-		read_sig_evnt.sigev_value.sival_ptr = arg;
-		if(lio_listio(LIO_NOWAIT, readlist, AIOMAX, &read_sig_evnt) == ERROR)
+		// AIO Read / Write Information
+		struct fileaio* newarg = (struct fileaio*) malloc(sizeof(struct fileaio));
+		newarg->srcfd = oldarg->srcfd;
+		newarg->destfd = oldarg->destfd;
+		newarg->filesize = oldarg->filesize;
+		newarg->list = list;
+		newarg->offset = offset;
+		newarg->count = pos;
+		newarg->handler = sig_evnt;
+
+		// Set sigevnt handler argument value
+		sig_evnt->sigev_value.sival_ptr = newarg;
+
+		if(lio_listio(LIO_NOWAIT, newarg->list, AIOMAX, newarg->handler) == ERROR)
 		{
 			strexit("READ LIO_LISTIO");
 		}
 		++outstanding_aio;
-		printf("Outstanding_AIO: %d\n", outstanding_aio);
 	}
+
+	// Handle Write AIO -> Convert Read AIO to Write AIO
+	for(int pos = 0; pos < oldarg->count; ++pos)
+	{
+		if(aio_error(oldarg->list[pos]))
+		{
+			strexit("READ AIO ERROR", aio_return(oldarg->list[pos]));
+		}
+
+		if(write(oldarg->destfd, (void*) oldarg->list[pos]->aio_buf, aio_return(oldarg->list[pos])) == ERROR)
+		{
+			strexit("WRITE");
+		}
+		//oldarg->list[pos]->aio_nbytes = aio_return(oldarg->list[pos]);
+		//oldarg->list[pos]->aio_fildes = oldarg->destfd;
+		//oldarg->list[pos]->aio_lio_opcode = LIO_WRITE;
+	}
+
+	// Start Write Event After Read Event to Avoid Thread Conflicts
+	//oldarg->handler->sigev_notify_function = write_aio_handler;
+	//if(lio_listio(LIO_NOWAIT, oldarg->list, AIOMAX, oldarg->handler) == ERROR)
+	//{
+	//	strexit("WRITE LIO_LISTIO");
+	//}
+	//++outstanding_aio;
+
 	--outstanding_aio;
 	sem_post(&sema_aio);
 }
@@ -203,7 +217,7 @@ void read_aio_handler(sigval_t sigval)
 
 int copy_file(const char *srcpath, const char *destpath)
 {
-	const unsigned PAGESIZE = sysconf(_SC_PAGESIZE);
+	const unsigned PAGESIZE = sysconf(_SC_PAGESIZE) * BUFSIZE;
 	int srcfd = open(srcpath, O_RDONLY);
 	if(srcfd == ERROR)
 	{
@@ -248,39 +262,47 @@ int copy_file(const char *srcpath, const char *destpath)
 		strexit("FALLOCATE");
 	}
 
-	struct aiocb* list[AIOMAX];
-	for(unsigned i = 0, offset = 0; i < AIOMAX && offset < st->st_size; ++i, offset += PAGESIZE)
+	struct aiocb** list = new struct aiocb*[AIOMAX]();
+	unsigned pos, offset;
+	for(pos = 0, offset = 0; pos < AIOMAX && offset <= st->st_size; ++pos, offset += PAGESIZE)
 	{
-		list[i] = (struct aiocb*)malloc(sizeof(struct aiocb));
-		if(!list[i])
+		list[pos] = (struct aiocb*)malloc(sizeof(struct aiocb));
+		if(!list[pos])
 		{
 			strexit("AIOCB MALLOC");
 		}
 
-		list[i]->aio_fildes = srcfd;
-		list[i]->aio_buf = malloc(PAGESIZE);
-		if(!list[i]->aio_buf)
+		list[pos]->aio_fildes = srcfd;
+		list[pos]->aio_buf = malloc(PAGESIZE);
+		if(!list[pos]->aio_buf)
 		{
 			strexit("AIOCB BUFFER");
 		}
-		list[i]->aio_nbytes = PAGESIZE;
-		list[i]->aio_offset = offset;
-		list[i]->aio_lio_opcode = LIO_READ;
+		list[pos]->aio_nbytes = PAGESIZE;
+		list[pos]->aio_offset = offset;
+		list[pos]->aio_lio_opcode = LIO_READ;
 	}
 
-	struct fileaio arg;
-	arg.srcfd = srcfd;
-	arg.destfd = destfd;
-	arg.filesize = st->st_size;
-	arg.list = list;
+	// Setup sigevent handler for when AIO finishes
+	struct sigevent* sig_evnt = (struct sigevent*) malloc(sizeof(struct sigevent));
+	sig_evnt->sigev_notify = SIGEV_THREAD;
+	sig_evnt->sigev_notify_function = read_aio_handler;
+	sig_evnt->sigev_notify_attributes = NULL;
 
-	// Setup Sigevent
-	struct sigevent sig_evnt;
-	sig_evnt.sigev_notify = SIGEV_THREAD;
-	sig_evnt.sigev_notify_function = read_aio_handler;
-	sig_evnt.sigev_notify_attributes = NULL;
-	sig_evnt.sigev_value.sival_ptr = &arg;
-	if(lio_listio(LIO_NOWAIT, list, AIOMAX, &sig_evnt) == ERROR)
+	// AIO Read / Write Information
+	struct fileaio* arg = (struct fileaio*) malloc(sizeof(struct fileaio));
+	arg->srcfd = srcfd;
+	arg->destfd = destfd;
+	arg->filesize = st->st_size;
+	arg->list = list;
+	arg->offset = offset;
+	arg->count = pos;
+	arg->handler = sig_evnt;
+
+	// Set sigevnt handler argument value
+	sig_evnt->sigev_value.sival_ptr = arg;
+
+	if(lio_listio(LIO_NOWAIT, arg->list, AIOMAX, arg->handler) == ERROR)
 	{
 		strexit("READ LIO_LISTIO");
 	}
@@ -409,7 +431,7 @@ int main(int argc, char *argv[])
 	// WAIT FOR ASYNCHRONOUS I/O TO FINISH
 	while(outstanding_aio > 0)
 	{
-		//sem_wait(&sema_aio);
+		sem_wait(&sema_aio);
 	}
 	sem_destroy(&sema_aio);
 

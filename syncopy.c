@@ -17,7 +17,7 @@
 #define ARGSNUM 3
 #define BTSIZE 10
 #define ERROR -1
-#define NOPENFD 50
+#define NOPENFD 1000
 
 std::string* srcfilepath;
 std::string* destfilepath;
